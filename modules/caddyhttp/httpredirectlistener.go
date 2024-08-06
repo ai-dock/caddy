@@ -143,8 +143,8 @@ func (c *httpRedirectConn) Read(p []byte) (int, error) {
 	headers.Add("Location", "https://"+req.Host+req.URL.String())
 	resp := &http.Response{
 		Proto:      "HTTP/1.0",
-		Status:     "308 Permanent Redirect",
-		StatusCode: 308,
+		Status:     "307 Temporary Redirect",
+		StatusCode: 307,
 		ProtoMajor: 1,
 		ProtoMinor: 0,
 		Header:     headers,
