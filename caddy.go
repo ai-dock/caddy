@@ -399,6 +399,7 @@ func unsyncedDecodeAndRun(cfgJSON []byte, allowPersist bool) error {
 func run(newCfg *Config, start bool) (Context, error) {
 	ctx, err := provisionContext(newCfg, start)
 	if err != nil {
+		globalMetrics.configSuccess.Set(0)
 		return ctx, err
 	}
 
@@ -410,6 +411,7 @@ func run(newCfg *Config, start bool) (Context, error) {
 	// some of the other apps at runtime
 	err = ctx.cfg.Admin.provisionAdminRouters(ctx)
 	if err != nil {
+		globalMetrics.configSuccess.Set(0)
 		return ctx, err
 	}
 
@@ -435,9 +437,11 @@ func run(newCfg *Config, start bool) (Context, error) {
 		return nil
 	}()
 	if err != nil {
+		globalMetrics.configSuccess.Set(0)
 		return ctx, err
 	}
-
+	globalMetrics.configSuccess.Set(1)
+	globalMetrics.configSuccessTime.SetToCurrentTime()
 	// now that the user's config is running, finish setting up anything else,
 	// such as remote admin endpoint, config loader, etc.
 	return ctx, finishSettingUp(ctx, ctx.cfg)
@@ -471,6 +475,7 @@ func provisionContext(newCfg *Config, replaceAdminServer bool) (Context, error) 
 	ctx, cancel := NewContext(Context{Context: context.Background(), cfg: newCfg})
 	defer func() {
 		if err != nil {
+			globalMetrics.configSuccess.Set(0)
 			// if there were any errors during startup,
 			// we should cancel the new context we created
 			// since the associated config won't be used;
@@ -497,7 +502,7 @@ func provisionContext(newCfg *Config, replaceAdminServer bool) (Context, error) 
 
 	// start the admin endpoint (and stop any prior one)
 	if replaceAdminServer {
-		err = replaceLocalAdminServer(newCfg)
+		err = replaceLocalAdminServer(newCfg, ctx)
 		if err != nil {
 			return ctx, fmt.Errorf("starting caddy administration endpoint: %v", err)
 		}
@@ -720,8 +725,10 @@ func Validate(cfg *Config) error {
 // Errors are logged along the way, and an appropriate exit
 // code is emitted.
 func exitProcess(ctx context.Context, logger *zap.Logger) {
-	// let the rest of the program know we're quitting
-	atomic.StoreInt32(exiting, 1)
+	// let the rest of the program know we're quitting; only do it once
+	if !atomic.CompareAndSwapInt32(exiting, 0, 1) {
+		return
+	}
 
 	// give the OS or service/process manager our 2 weeks' notice: we quit
 	if err := notify.Stopping(); err != nil {

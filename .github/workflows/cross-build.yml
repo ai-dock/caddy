@@ -28,12 +28,16 @@ jobs:
           - 'netbsd'
         go: 
           - '1.22'
+          - '1.23'
 
         include:
         # Set the minimum Go patch version for the given Go minor
         # Usable via ${{ matrix.GO_SEMVER }}
         - go: '1.22'
           GO_SEMVER: '~1.22.3'
+
+        - go: '1.23'
+          GO_SEMVER: '~1.23.0'
 
     runs-on: ubuntu-latest
     continue-on-error: true
@@ -66,4 +70,4 @@ jobs:
         continue-on-error: true
         working-directory: ./cmd/caddy
         run: |
-          GOOS=$GOOS GOARCH=$GOARCH go build -tags nobadger -trimpath -o caddy-"$GOOS"-$GOARCH 2> /dev/null
+          GOOS=$GOOS GOARCH=$GOARCH go build -tags=nobadger,nomysql,nopgx -trimpath -o caddy-"$GOOS"-$GOARCH 2> /dev/null

@@ -27,12 +27,14 @@ import (
 	"net/url"
 	"os"
 	"reflect"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/pires/go-proxyproto"
 	"github.com/quic-go/quic-go/http3"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 	"golang.org/x/net/http2"
 
 	"github.com/caddyserver/caddy/v2"
@@ -132,11 +134,15 @@ type HTTPTransport struct {
 	// to change or removal while experimental.
 	Versions []string `json:"versions,omitempty"`
 
+	// Specify the address to bind to when connecting to an upstream. In other words,
+	// it is the address the upstream sees as the remote address.
+	LocalAddress string `json:"local_address,omitempty"`
+
 	// The pre-configured underlying HTTP transport.
 	Transport *http.Transport `json:"-"`
 
 	h2cTransport *http2.Transport
-	h3Transport  *http3.RoundTripper // TODO: EXPERIMENTAL (May 2024)
+	h3Transport  *http3.Transport // TODO: EXPERIMENTAL (May 2024)
 }
 
 // CaddyModule returns the Caddy module information.
@@ -185,6 +191,31 @@ func (h *HTTPTransport) NewTransport(caddyCtx caddy.Context) (*http.Transport, e
 		FallbackDelay: time.Duration(h.FallbackDelay),
 	}
 
+	if h.LocalAddress != "" {
+		netaddr, err := caddy.ParseNetworkAddressWithDefaults(h.LocalAddress, "tcp", 0)
+		if err != nil {
+			return nil, err
+		}
+		if netaddr.PortRangeSize() > 1 {
+			return nil, fmt.Errorf("local_address must be a single address, not a port range")
+		}
+		switch netaddr.Network {
+		case "tcp", "tcp4", "tcp6":
+			dialer.LocalAddr, err = net.ResolveTCPAddr(netaddr.Network, netaddr.JoinHostPort(0))
+			if err != nil {
+				return nil, err
+			}
+		case "unix", "unixgram", "unixpacket":
+			dialer.LocalAddr, err = net.ResolveUnixAddr(netaddr.Network, netaddr.JoinHostPort(0))
+			if err != nil {
+				return nil, err
+			}
+		case "udp", "udp4", "udp6":
+			return nil, fmt.Errorf("local_address must be a TCP address, not a UDP address")
+		default:
+			return nil, fmt.Errorf("unsupported network")
+		}
+	}
 	if h.Resolver != nil {
 		err := h.Resolver.ParseAddresses()
 		if err != nil {
@@ -351,7 +382,7 @@ func (h *HTTPTransport) NewTransport(caddyCtx caddy.Context) (*http.Transport, e
 		rt.DisableCompression = !*h.Compression
 	}
 
-	if sliceContains(h.Versions, "2") {
+	if slices.Contains(h.Versions, "2") {
 		if err := http2.ConfigureTransport(rt); err != nil {
 			return nil, err
 		}
@@ -362,7 +393,7 @@ func (h *HTTPTransport) NewTransport(caddyCtx caddy.Context) (*http.Transport, e
 	// do (that'd add latency and complexity, besides, we expect that
 	// site owners  control the backends), so it must be exclusive
 	if len(h.Versions) == 1 && h.Versions[0] == "3" {
-		h.h3Transport = new(http3.RoundTripper)
+		h.h3Transport = new(http3.Transport)
 		if h.TLS != nil {
 			var err error
 			h.h3Transport.TLSClientConfig, err = h.TLS.MakeTLSClientConfig(caddyCtx)
@@ -370,13 +401,13 @@ func (h *HTTPTransport) NewTransport(caddyCtx caddy.Context) (*http.Transport, e
 				return nil, fmt.Errorf("making TLS client config for HTTP/3 transport: %v", err)
 			}
 		}
-	} else if len(h.Versions) > 1 && sliceContains(h.Versions, "3") {
+	} else if len(h.Versions) > 1 && slices.Contains(h.Versions, "3") {
 		return nil, fmt.Errorf("if HTTP/3 is enabled to the upstream, no other HTTP versions are supported")
 	}
 
 	// if h2c is enabled, configure its transport (std lib http.Transport
 	// does not "HTTP/2 over cleartext TCP")
-	if sliceContains(h.Versions, "h2c") {
+	if slices.Contains(h.Versions, "h2c") {
 		// crafting our own http2.Transport doesn't allow us to utilize
 		// most of the customizations/preferences on the http.Transport,
 		// because, for some reason, only http2.ConfigureTransport()
@@ -446,6 +477,9 @@ func (h *HTTPTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	// if H2C ("HTTP/2 over cleartext") is enabled and the upstream request is
 	// HTTP without TLS, use the alternate H2C-capable transport instead
 	if req.URL.Scheme == "http" && h.h2cTransport != nil {
+		// There is no dedicated DisableKeepAlives field in *http2.Transport.
+		// This is an alternative way to disable keep-alive.
+		req.Close = h.Transport.DisableKeepAlives
 		return h.h2cTransport.RoundTrip(req)
 	}
 
@@ -511,11 +545,11 @@ type TLSConfig struct {
 	// Certificate authority module which provides the certificate pool of trusted certificates
 	CARaw json.RawMessage `json:"ca,omitempty" caddy:"namespace=tls.ca_pool.source inline_key=provider"`
 
-	// DEPRECATED: Use the `ca` field with the `tls.ca_pool.source.inline` module instead.
+	// Deprecated: Use the `ca` field with the `tls.ca_pool.source.inline` module instead.
 	// Optional list of base64-encoded DER-encoded CA certificates to trust.
 	RootCAPool []string `json:"root_ca_pool,omitempty"`
 
-	// DEPRECATED: Use the `ca` field with the `tls.ca_pool.source.file` module instead.
+	// Deprecated: Use the `ca` field with the `tls.ca_pool.source.file` module instead.
 	// List of PEM-encoded CA certificate files to add to the same trust
 	// store as RootCAPool (or root_ca_pool in the JSON).
 	RootCAPEMFiles []string `json:"root_ca_pem_files,omitempty"`
@@ -718,7 +752,9 @@ func (c *tcpRWTimeoutConn) Read(b []byte) (int, error) {
 	if c.readTimeout > 0 {
 		err := c.TCPConn.SetReadDeadline(time.Now().Add(c.readTimeout))
 		if err != nil {
-			c.logger.Error("failed to set read deadline", zap.Error(err))
+			if ce := c.logger.Check(zapcore.ErrorLevel, "failed to set read deadline"); ce != nil {
+				ce.Write(zap.Error(err))
+			}
 		}
 	}
 	return c.TCPConn.Read(b)
@@ -728,7 +764,9 @@ func (c *tcpRWTimeoutConn) Write(b []byte) (int, error) {
 	if c.writeTimeout > 0 {
 		err := c.TCPConn.SetWriteDeadline(time.Now().Add(c.writeTimeout))
 		if err != nil {
-			c.logger.Error("failed to set write deadline", zap.Error(err))
+			if ce := c.logger.Check(zapcore.ErrorLevel, "failed to set write deadline"); ce != nil {
+				ce.Write(zap.Error(err))
+			}
 		}
 	}
 	return c.TCPConn.Write(b)
@@ -744,16 +782,6 @@ func decodeBase64DERCert(certStr string) (*x509.Certificate, error) {
 
 	// parse the DER-encoded certificate
 	return x509.ParseCertificate(derBytes)
-}
-
-// sliceContains returns true if needle is in haystack.
-func sliceContains(haystack []string, needle string) bool {
-	for _, s := range haystack {
-		if s == needle {
-			return true
-		}
-	}
-	return false
 }
 
 // Interface guards

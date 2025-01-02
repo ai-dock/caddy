@@ -87,7 +87,7 @@ See [our online documentation](https://caddyserver.com/docs/install) for other i
 
 Requirements:
 
-- [Go 1.21 or newer](https://golang.org/dl/)
+- [Go 1.22.3 or newer](https://golang.org/dl/)
 
 ### For development
 
@@ -131,7 +131,7 @@ $ xcaddy build
 4. Initialize a Go module: `go mod init caddy`
 5. (Optional) Pin Caddy version: `go get github.com/caddyserver/caddy/v2@version` replacing `version` with a git tag, commit, or branch name.
 6. (Optional) Add plugins by adding their import: `_ "import/path/here"`
-7. Compile: `go build`
+7. Compile: `go build -tags=nobadger,nomysql,nopgx`
 
 
 
